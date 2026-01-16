@@ -1,0 +1,106 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  TEST_PLAN_ID: 50
+  TOKEN: OlMg4S3EwtUyzaeMV98Q==
+
+
+stages:
+- stage: Run_ContextQA_Tests
+  displayName: "ContextQA Test Plan Execution"
+  jobs:
+  - job: run_contextqa_tests
+    displayName: "Run ContextQA Tests"
+    steps:
+
+    - checkout: self
+
+    - script: |
+        echo "Triggering test execution for Test Plan ID: $(TEST_PLAN_ID)"
+
+        API_URL="https://server.contextqa.com/test_plans/$(TEST_PLAN_ID)/execution"
+        echo "Calling API: $API_URL"
+
+        RESPONSE=$(curl -s -w "%{http_code}" --location "$API_URL" \
+          --header "token: $(TOKEN)"
+        )
+
+        HTTP_CODE="${RESPONSE: -3}"
+        BODY="${RESPONSE::-3}"
+
+        if [ "$HTTP_CODE" -ne 200 ]; then
+          echo "❌ API Error while starting test!"
+          echo "HTTP Code: $HTTP_CODE"
+          echo "Response: $BODY"
+          exit 1
+        fi
+
+        echo "Response: $BODY"
+
+        JOB_ID=$(echo $BODY | jq -r '.id')
+
+        if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+          echo "❌ ERROR: Job ID missing in API response!"
+          exit 1
+        fi
+
+        echo "##vso[task.setvariable variable=JOB_ID]$JOB_ID"
+        echo "Started Test Job ID: $JOB_ID"
+      displayName: "Trigger Test Plan Execution"
+
+    - script: sleep 10
+      displayName: "Initial Wait Before Polling"
+
+    - script: |
+        echo "⏳ Waiting for test plan $(TEST_PLAN_ID) to complete..."
+        STATUS=""
+        PREV_COMPLETED=-1
+
+        while [ "$STATUS" != "STATUS_COMPLETED" ]; do
+          sleep 30
+
+          RESPONSE=$(curl -s --location \
+            "https://server.contextqa.com/test_plan_results/$(JOB_ID)/results" \
+            --header "token: $(TOKEN)")
+
+          RESULT=$(echo $RESPONSE | jq -r '.result')
+          STATUS=$(echo $RESPONSE | jq -r '.status')
+          TOTAL=$(echo $RESPONSE | jq -r '.totalCount')
+          PASSED=$(echo $RESPONSE | jq -r '.passedCount')
+          FAILED=$(echo $RESPONSE | jq -r '.failedCount')
+          ABORTED=$(echo $RESPONSE | jq -r '.abortedCount')
+          STOPPED=$(echo $RESPONSE | jq -r '.stoppedCount')
+          NOT_EXEC=$(echo $RESPONSE | jq -r '.notExecutedCount')
+          REPORT_URL=$(echo $RESPONSE | jq -r '.reportFileUrl')
+
+          COMPLETED=$((PASSED + FAILED + ABORTED + STOPPED + NOT_EXEC))
+
+          if [ "$COMPLETED" -ne "$PREV_COMPLETED" ]; then
+            echo "➡️ Status: $STATUS | Completed: $COMPLETED / $TOTAL | Passed: $PASSED | Failed: $FAILED"
+            PREV_COMPLETED=$COMPLETED
+          else
+            echo "➡️ Status: $STATUS | No new updates..."
+          fi
+
+          if [ "$STATUS" = "STATUS_COMPLETED" ]; then
+            echo "🟢 Status: COMPLETED – All tests finished."
+            break
+          fi
+        done
+
+        echo "##vso[task.setvariable variable=FINAL_RESULT]$RESULT"
+        echo "##vso[task.setvariable variable=TOTAL]$TOTAL"
+        echo "##vso[task.setvariable variable=PASSED]$PASSED"
+        echo "##vso[task.setvariable variable=FAILED]$FAILED"
+        echo "##vso[task.setvariable variable=REPORT_URL]$REPORT_URL"
+
+        echo "✔️ Test Execution Completed"
+        echo "🧾 FINAL RESULT: $RESULT"
+        echo "📌 JOB ID: $(JOB_ID)"
+      displayName: "Poll Test Result Until Completed"
